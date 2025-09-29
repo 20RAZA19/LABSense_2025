@@ -3,29 +3,37 @@
 #include <WiFi.h>
 #include "time.h"
 #include <ThingESP.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 
+// --- Definición de Pines ---
 #define DHTPIN 5
-#define MQ2PIN 26
-#define MQ3PIN 25
-#define MQ7PIN 32
-#define MQ135PIN 33
+#define MQ2PIN 32
+#define MQ3PIN 33
+#define MQ7PIN 34
+#define MQ135PIN 35
+
 
 #define DHTTYPE DHT11
 #define NEXTION_RX 16
 #define NEXTION_TX 17
 
+
 // Configuración WiFi, NTP y ThingESP
+const char* ssid = "Zamora";
+const char* password = "Multitech2023#";
 ThingESP32 thing("RAZA19", "LABSense", "Promo2025");
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -21600;
 const int daylightOffset_sec = 0;
+const char* serverName = "https://script.google.com/macros/s/AKfycbyb6xuSN3CpJHUS9XJ63XSk-yzaWYHaXVaugUPGw6z3FOEC_vY33O9bpYrVc6IKHR3Ybw/exec";
 
 // Parámetros de Sensores
 const float VOLTAJE_ESP = 3.3;
 const float RESOLUCION_ADC = 4095.0;
 const float RESISTENCIA_CARGA_MQ2 = 5.0; 
 const float RESISTENCIA_CARGA_MQ3 = 200.0; 
-const float RESISTENCIA_CARGA_MQ7 = 10.0;
+const float RESISTENCIA_CARGA_MQ7 = 10.0; 
 const float RESISTENCIA_CARGA_MQ135 = 20.0;
 
 // Curvas de Sensibilidad
@@ -58,6 +66,7 @@ bool p8_s0_paused = false, p8_s1_paused = false;
 
 char buffer[100];
 
+// Prototipos de Funciones
 String HandleResponse(String query);
 
 void sendCommandToNextion(String cmd) {
@@ -86,7 +95,7 @@ float calibrarSensor(int pin, float rl_value) {
     float Rs_sum = 0;
     for (int i = 0; i < 50; i++) {
         Rs_sum += calcularResistenciaSensor(pin, rl_value);
-        delay(500);
+        delay(100);
     }
     return Rs_sum / 50.0;
 }
@@ -133,13 +142,26 @@ void setup() {
     dht.begin();
     
     sendCommandToNextion("page0.t_status.txt=\"Conectando a WiFi...\"");
-    thing.SetWiFi("Zamora", "Multitech2023#");
-    thing.initDevice(); // Se conecta a WiFi y ThingESP
+    WiFi.begin(ssid, password);
+    unsigned long wifiStartTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - wifiStartTime < 20000) { 
+        long progress = map(millis() - wifiStartTime, 0, 20000, 12, 25);
+        sprintf(buffer, "page0.j_loading.val=%ld", progress);
+        sendCommandToNextion(buffer);
+        delay(500); 
+    }
 
-    sendCommandToNextion("page0.t_status.txt=\"WiFi Conectado\"");
-    sendCommandToNextion("page0.j_loading.val=25");
-    delay(500);
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    if (WiFi.status() == WL_CONNECTED) {
+        sendCommandToNextion("page0.t_status.txt=\"WiFi Conectado\"");
+        thing.initDevice(); 
+        sendCommandToNextion("page0.j_loading.val=25");
+        delay(500);
+        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    } else {
+        sendCommandToNextion("page0.t_status.txt=\"Error de Conexion\"");
+        sendCommandToNextion("page0.j_loading.val=25");
+        delay(1000);
+    }
 
     sendCommandToNextion("page0.t_status.txt=\"Calibrando MQ-2...\"");
     sendCommandToNextion("page0.j_loading.val=37");
@@ -166,27 +188,25 @@ void setup() {
     sendCommandToNextion("page 1");
 }
 
-// Función para dar formato a todas las respuestas del chatbot
 String formatResponse(String sensorName, String data) {
     struct tm timeinfo;
-    if(!getLocalTime(&timeinfo)){
-        return "Error al obtener la hora.";
+    if(!getLocalTime(&timeinfo) || WiFi.status() != WL_CONNECTED){
+        return "Error: No es posible obtener la hora. Verifique la conexión a Internet.";
     }
     char timeString[20];
     strftime(timeString, sizeof(timeString), "%d/%m/%Y %H:%M:%S", &timeinfo);
-    String response = "📊 **Datos del Sensor " + sensorName + "**\n";
+    String response = "📊 *Datos del Sensor " + sensorName + "*\n";
     response += "-----------------------------------\n";
     response += data + "\n";
     response += "-----------------------------------\n";
-    response += "📅 **Medición:** " + String(timeString);
-    response += "\n Medición realizada por: **LABSense (2025)** | ""LS"" ©️";
+    response += "📅 *Medición:* " + String(timeString);
     return response;
 }
 
-// Función que se encarga de procesar los comandos del chatbot y dar respuestas al monitor serial
 String HandleResponse(String query)
 {
     query.toLowerCase();
+
     if (query == "/data dht11") {
         float h = dht.readHumidity();
         float t = dht.readTemperature();
@@ -195,7 +215,6 @@ String HandleResponse(String query)
         }
         return formatResponse("DHT11", "🌡️ Temperatura: " + String(t, 2) + " °C\n💧 Humedad: " + String(h, 2) + " %");
     }
-
     else if (query == "/data mq2") {
         int lpg = (int)leerSensor(LPG_A, LPG_B, R0_MQ2, MQ2PIN, RESISTENCIA_CARGA_MQ2);
         int humo = (int)leerSensor(SMOKE_A, SMOKE_B, R0_MQ2, MQ2PIN, RESISTENCIA_CARGA_MQ2);
@@ -206,7 +225,6 @@ String HandleResponse(String query)
         data += "⚛️ Hidrógeno: " + String(h2) + " ppm";
         return formatResponse("MQ-2", data);
     }
-
     else if (query == "/data mq3") {
         float alcohol = leerSensor(ALCOHOL_A, ALCOHOL_B, R0_MQ3, MQ3PIN, RESISTENCIA_CARGA_MQ3);
         float benceno = leerSensor(BENZENE_A, BENZENE_B, R0_MQ3, MQ3PIN, RESISTENCIA_CARGA_MQ3);
@@ -215,14 +233,11 @@ String HandleResponse(String query)
         data += "🧪 Benceno: " + String(benceno, 2) + " mg/L";
         return formatResponse("MQ-3", data);
     }
-
     else if (query == "/data mq7") {
         int co = (int)leerSensor(CO_A, CO_B, R0_MQ7, MQ7PIN, RESISTENCIA_CARGA_MQ7);
-
         String data = "☠️ Monóxido de Carbono (CO): " + String(co) + " ppm";
         return formatResponse("MQ-7", data);
     }
-
     else if (query == "/data mq135") {
         int tolueno = (int)leerSensor(TOLUENE_A, TOLUENE_B, R0_MQ135, MQ135PIN, RESISTENCIA_CARGA_MQ135);
         int amoniaco = (int)leerSensor(AMMONIA_A, AMMONIA_B, R0_MQ135, MQ135PIN, RESISTENCIA_CARGA_MQ135);
@@ -233,23 +248,23 @@ String HandleResponse(String query)
         data += "☁️ Dióxido de Carbono (CO2): " + String(co2) + " ppm";
         return formatResponse("MQ-135", data);
     }
-
     else if (query == "/status") {
         String ipAddress = WiFi.localIP().toString();
-        String statusMessage = "✅ ¡Sistema *LABSense* en línea!\n";
+        String statusMessage = "✅ ¡Sistema LABSense en línea!\n";
         statusMessage += "    Dirección IP: " + ipAddress;
         return formatResponse("Estado del Sistema", statusMessage);
     }
-
     else {
-        return "Comando no válido. Prueba con:\n*/Status\n/Data dht11\n/Data mq2\n/Data mq3\n/Data mq7\n/Data mq135*";
+        return "Comando no válido. Prueba con:\n/status\n/data dht11\n/data mq2\n/data mq3\n/data mq7\n/data mq135";
     }
 }
 
+
 void loop() {
-    thing.Handle(); // Maneja la comunicación con el chatbot de manera indefinida
+    if (WiFi.status() == WL_CONNECTED) {
+        thing.Handle();
+    }
     
-    // La siguiente sección actualiza la pantalla Nextion
     readAllSensors();
     
     // Página 1 (Dashboard)
@@ -266,7 +281,6 @@ void loop() {
     sprintf(buffer, "page1.Amoniaco.txt=\"%d\"", amoniaco_ppm); sendCommandToNextion(buffer);
     sprintf(buffer, "page1.ICA.txt=\"%d\"", ica_valor); sendCommandToNextion(buffer);
 
-    // Valores de las progres bar, las agujas y las funciones de onda   
     long temp_progress = map(temperatura, 0, 50, 0, 100);
     sprintf(buffer, "page1.j1.val=%ld", temp_progress); sendCommandToNextion(buffer);
 
@@ -412,10 +426,60 @@ void loop() {
         sendCommandToNextion("page7.time.txt=\"" + no_time_str + "\"");
         sendCommandToNextion("page8.time.txt=\"" + no_time_str + "\"");
         sendCommandToNextion("page9.time.txt=\"" + no_time_str + "\"");
-                                
+        
         String no_date_str = "----/--/--";
         sendCommandToNextion("page1.date.txt=\"" + no_date_str + "\"");
     }
-    
+
+    //Envío de valores a una hoja de cálculo con Google Sheets
+    Serial.print("Temperatura: "); Serial.print(temperatura); Serial.write("\xC2\xB0"); Serial.println("C"); 
+    Serial.print("Humedad: ");Serial.print(humedad);Serial.println("%");
+    Serial.print("LPG: ");Serial.print(lpg_ppm);Serial.println("PPM");
+    Serial.print("H2: ");Serial.print(h2_ppm);Serial.println("PPM");
+    Serial.print("Humo: ");Serial.print(humo_ppm);Serial.println("PPM");
+    Serial.print("Alcohol: ");Serial.print(alcohol_mgL);Serial.println("PPM");
+    Serial.print("Benceno: ");Serial.print(benceno_mgL);Serial.println("PPM");
+    Serial.print("CO: ");Serial.print(co_ppm);Serial.println("PPM");
+    Serial.print("CO2: ");Serial.print(co2_ppm);Serial.println("PPM");
+    Serial.print("Amoníaco: ");Serial.print(amoniaco_ppm);Serial.println("PPM");
+    Serial.print("Tolueno: ");Serial.print(tolueno_ppm);Serial.println("PPM");
+    Serial.print("ICA: ");Serial.print(ica_valor);
+    sendToGoogleSheet();
     delay(250);
+}
+
+void sendToGoogleSheet() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverName);
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<512> doc;
+    doc["temperatura"] = temperatura;
+    doc["humedad"] = humedad;
+    doc["lpg_ppm"] = lpg_ppm;
+    doc["h2_ppm"] = h2_ppm;
+    doc["humo_ppm"] = humo_ppm;
+    doc["benceno_mgL"] = benceno_mgL;
+    doc["alcohol_mgL"] = alcohol_mgL;
+    doc["co_ppm"] = co_ppm;
+    doc["co2_ppm"] = co2_ppm;
+    doc["amoniaco_ppm"] = amoniaco_ppm;
+    doc["tolueno_ppm"] = tolueno_ppm;
+    doc["ica_valor"] = ica_valor;
+    String jsonString;
+    serializeJson(doc, jsonString);
+
+    int httpResponseCode = http.POST(jsonString);
+
+    if (httpResponseCode > 0) {
+      String response = http.getString();
+      Serial.println(httpResponseCode);
+      Serial.println(response);
+    } else {
+      Serial.print("Wrong request POST: ");
+      Serial.println(httpResponseCode);
+    }
+    http.end();
+  }
 }
